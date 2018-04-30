@@ -42,7 +42,7 @@ static memfs_size_t get_size(memfs_addr address);
 static int get_alloc(memfs_addr address);
 static void put(memfs_addr address, unsigned long val);
 static void map_mm(memfs_addr address);
-static void unmap_mm(memfs_addr bp);
+static void unmap_mm(memfs_addr address);
 static void memfs_mm_init(void);
 static void memfs_mm_free(memfs_addr bp);
 static void memfs_mm_coalesce(memfs_addr bp);
@@ -105,20 +105,13 @@ static void map_mm(memfs_addr address) {
     memset(mem[address], 0, BLOCK_SIZE);
 }
 
-static void unmap_mm(memfs_addr bp) {
-    int allocated = get_alloc(hdrp(bp));
-    assert (allocated == BLOCK_FREE);
-    memfs_size_t size = get_size(hdrp(bp));
-    memfs_addr fdr = ftrp(bp);
-    memfs_addr i;
-    for (i = bp; i < fdr; ++i) {
-        if (mem[i] != NULL) {
-            if (munmap(mem[i], BLOCK_SIZE) < 0) {
-                perror("munmap failed.");
-                return;
-            }
-        }
+static void unmap_mm(memfs_addr address) {
+    assert(mem[address] != NULL);
+    if (munmap(mem[address], BLOCK_SIZE) < 0) {
+        perror("munmap failed.");
+        return;
     }
+    mem[address] = NULL;
 }
 
 static void memfs_mm_init(void) {
@@ -140,6 +133,11 @@ static void memfs_mm_free(memfs_addr bp) {
     memfs_size_t size = get_size(hdrp(bp));
     put(hdrp(bp), pack(size, BLOCK_FREE));
     put(ftrp(bp), pack(size, BLOCK_FREE));
+    
+    memfs_addr footer = ftrp(bp);
+    memfs_addr i;
+    for (i = bp; i < footer; ++i) unmap_mm(i);
+
     memfs_mm_coalesce(bp);
 }
 
@@ -149,25 +147,30 @@ static void memfs_mm_coalesce(memfs_addr bp) {
     memfs_size_t size = get_size(hdrp(bp));
 
     if (prev_alloc == BLOCK_ALLOCATED && next_alloc == BLOCK_ALLOCATED) {
-        unmap_mm(bp);
+        
     }
     else if (prev_alloc == BLOCK_ALLOCATED && next_alloc == BLOCK_FREE) {
         size += get_size(hdrp(next_blkp(bp)));
+        unmap_mm(ftrp(bp));
+        unmap_mm(hdrp(next_blkp(bp)));
         put(hdrp(bp), pack(size, BLOCK_FREE));
         put(ftrp(bp), pack(size, BLOCK_FREE));
-        unmap_mm(bp);
     }
     else if (prev_alloc == BLOCK_FREE && next_alloc == BLOCK_ALLOCATED) {
         size += get_size(hdrp(prev_blkp(bp)));
         put(ftrp(bp), pack(size, BLOCK_FREE));
         put(hdrp(prev_blkp(bp)), pack(size, BLOCK_FREE));
-        unmap_mm(prev_blkp(bp));
+        unmap_mm(ftrp(bp));
+        unmap_mm(bp - 2);
     }
     else {
         size += get_size(hdrp(prev_blkp(bp))) + get_size(ftrp(next_blkp(bp)));
         put(hdrp(prev_blkp(bp)), pack(size, BLOCK_FREE));
         put(ftrp(next_blkp(bp)), pack(size, BLOCK_FREE));
-        unmap_mm(prev_blkp(bp));
+        unmap_mm(ftrp(bp) + 1);
+        unmap_mm(ftrp(bp));
+        unmap_mm(hdrp(bp) - 1);
+        unmap_mm(hdrp(bp));
     }
 }
 
