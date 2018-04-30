@@ -112,10 +112,11 @@ static void unmap_mm(memfs_addr bp) {
     memfs_addr fdr = ftrp(bp);
     memfs_addr i;
     for (i = bp; i < fdr; ++i) {
-        assert(mem[i] != NULL);
-        if (munmap(mem[i], BLOCK_SIZE) < 0) {
-            perror("munmap failed.");
-            return;
+        if (mem[i] != NULL) {
+            if (munmap(mem[i], BLOCK_SIZE) < 0) {
+                perror("munmap failed.");
+                return;
+            }
         }
     }
 }
@@ -137,8 +138,8 @@ static void memfs_mm_init(void) {
 static void memfs_mm_free(memfs_addr bp) {
     // size_t in our memfs address space is `unsigned long`
     memfs_size_t size = get_size(hdrp(bp));
-    put(hdrp(bp), pack(size, 0));
-    put(ftrp(bp), pack(size, 0));
+    put(hdrp(bp), pack(size, BLOCK_FREE));
+    put(ftrp(bp), pack(size, BLOCK_FREE));
     memfs_mm_coalesce(bp);
 }
 
@@ -150,13 +151,13 @@ static void memfs_mm_coalesce(memfs_addr bp) {
     if (prev_alloc == BLOCK_ALLOCATED && next_alloc == BLOCK_ALLOCATED) {
         unmap_mm(bp);
     }
-    if (prev_alloc == BLOCK_ALLOCATED && next_alloc == BLOCK_FREE) {
+    else if (prev_alloc == BLOCK_ALLOCATED && next_alloc == BLOCK_FREE) {
         size += get_size(hdrp(next_blkp(bp)));
         put(hdrp(bp), pack(size, BLOCK_FREE));
         put(ftrp(bp), pack(size, BLOCK_FREE));
         unmap_mm(bp);
     }
-    if (prev_alloc == BLOCK_FREE && next_alloc == BLOCK_ALLOCATED) {
+    else if (prev_alloc == BLOCK_FREE && next_alloc == BLOCK_ALLOCATED) {
         size += get_size(hdrp(prev_blkp(bp)));
         put(ftrp(bp), pack(size, BLOCK_FREE));
         put(hdrp(prev_blkp(bp)), pack(size, BLOCK_FREE));
@@ -351,7 +352,6 @@ static int memfs_write(const char *path, const char *buf, size_t size, off_t off
             memfs_mm_free(content_addr);
             content_already_read += BLOCK_SIZE * (get_size(hdrp(content_addr)));
             memfs_addr temp = c_list_p->next;
-            memfs_mm_free(c_list_p->next);
             memfs_mm_free(c_list_addr);
             c_list_addr = temp;
             if (c_list_addr != -1) c_list_p = (struct content_list *) mem[c_list_addr];
@@ -416,8 +416,7 @@ static int memfs_read(const char *path, char *buf, size_t size, off_t offset, st
         char *content_reader = (char *) mem[content_addr];
         memcpy(content_concatenated + content_already_read, content_reader, BLOCK_SIZE * (get_size(hdrp(content_addr)) - 2));
         content_already_read += BLOCK_SIZE * (get_size(hdrp(content_addr)));
-        memfs_addr temp = c_list_p->next;
-        c_list_addr = temp;
+        c_list_addr = c_list_p->next;
         if (c_list_addr != -1) c_list_p = (struct content_list *) mem[c_list_addr];
         else c_list_p = NULL;
     }
@@ -450,7 +449,6 @@ static int memfs_truncate(const char *path, off_t size) {
         memfs_mm_free(content_addr);
         content_already_read += BLOCK_SIZE * (get_size(hdrp(content_addr)));
         memfs_addr temp = c_list_p->next;
-        memfs_mm_free(c_list_p->next);
         memfs_mm_free(c_list_addr);
         c_list_addr = temp;
         if (c_list_addr != -1) c_list_p = (struct content_list *) mem[c_list_addr];
@@ -520,7 +518,7 @@ static int memfs_unlink(const char *path) {
         struct content_list *c_list_p = (struct content_list *) mem[c_list_addr];
         memfs_mm_free(c_list_p->this_content);
         memfs_addr temp = c_list_p->next;
-        memfs_mm_free(c_list_p->next);
+        memfs_mm_free(c_list_addr);
         c_list_addr = temp;
     }
 
