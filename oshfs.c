@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fuse.h>
 #include <stdio.h>
+#include <math.h>
 
 #define BLOCK_NR 64 * 1024
 #define BLOCK_SIZE 8
@@ -19,14 +20,14 @@ typedef unsigned long memfs_size_t;
 struct content_list {
     memfs_addr this_content;
     memfs_addr next;
-}
+};
 
 struct filenode {
     memfs_addr filename;
     memfs_addr c_list;
     memfs_addr st;
     memfs_addr next;
-}
+};
 
 static void *mem[BLOCK_NR];
 static memfs_addr list_head;
@@ -54,9 +55,13 @@ static int memfs_mknod(const char *path, mode_t mode, dev_t dev);
 static int memfs_open(const char *path, struct fuse_file_info *fi);
 static int memfs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi);
 static int memfs_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi);
-static int memfs_truncate(const char *path, size_t size);
+static int memfs_truncate(const char *path, off_t size);
 static int memfs_unlink(const char *path);
 static void *memfs_init(struct fuse_conn_info *conn);
+
+static unsigned long pack(unsigned long size, unsigned long alloc) {
+    return size | alloc;
+}
 
 static memfs_addr hdrp(memfs_addr bp) {
     return bp - 1;
@@ -105,7 +110,7 @@ static void unmap_mm(memfs_addr bp) {
     memfs_size_t size = get_size(hdrp(bp));
     memfs_addr fdr = ftrp(bp);
     memfs_addr i;
-    for (i = bp; i < ftrp(bp); ++i) {
+    for (i = bp; i < fdr; ++i) {
         assert(mem[i] != NULL);
         if (munmap(mem[i], BLOCK_SIZE) < 0) {
             perror("munmap failed.");
@@ -145,20 +150,20 @@ static void memfs_mm_coalesce(memfs_addr bp) {
         unmap_mm(bp);
     }
     if (prev_alloc == BLOCK_ALLOCATED && next_alloc == BLOCK_FREE) {
-        size += get_size(hdrp(next_blkp(bp)))
-        put(hdrp(bp), pack(size, BLOCK_FREE))
-        put(ftrp(bp), pack(size, BLOCK_FREE))
+        size += get_size(hdrp(next_blkp(bp)));
+        put(hdrp(bp), pack(size, BLOCK_FREE));
+        put(ftrp(bp), pack(size, BLOCK_FREE));
         unmap_mm(bp);
     }
     if (prev_alloc == BLOCK_FREE && next_alloc == BLOCK_ALLOCATED) {
         size += get_size(hdrp(prev_blkp(bp)));
         put(ftrp(bp), pack(size, BLOCK_FREE));
         put(hdrp(prev_blkp(bp)), pack(size, BLOCK_FREE));
-        unmap(prev_blkp(bp));
+        unmap_mm(prev_blkp(bp));
     }
     else {
         size += get_size(hdrp(prev_blkp(bp))) + get_size(ftrp(next_blkp(bp)));
-        put(hdrp(perv_blkp(bp)), pack(size, BLOCK_FREE));
+        put(hdrp(prev_blkp(bp)), pack(size, BLOCK_FREE));
         put(ftrp(next_blkp(bp)), pack(size, BLOCK_FREE));
         unmap_mm(prev_blkp(bp));
     }
@@ -199,8 +204,8 @@ static memfs_addr memfs_mm_alloc(memfs_size_t asize) {
         if (mem[ftrp(match)] == NULL) map_mm(ftrp(match));
         put(ftrp(match), pack(asize, BLOCK_ALLOCATED));
         if (mem[hdrp(next_blkp(match))] == NULL) map_mm(hdrp(next_blkp(match)));
-        put(hdrp(next_blkp(match)), pack(csize - asize, BLOCK_FREE);
-        put(ftrp(next_blkp(match)), pack(csize - asize, BLOCK_FREE);
+        put(hdrp(next_blkp(match)), pack(csize - asize, BLOCK_FREE));
+        put(ftrp(next_blkp(match)), pack(csize - asize, BLOCK_FREE));
     }
     else {
         put(hdrp(match), pack(csize, BLOCK_ALLOCATED));
@@ -220,7 +225,7 @@ static void create_filenode(const char *filename, const struct stat *st) {
     new_filenode_mapped->next = filelist_root;
     new_filenode_mapped->st = memfs_mm_alloc(ceil(sizeof(struct stat)));
     struct stat *st_p = mem[new_filenode_mapped->st];
-    memcpy(st_p, st, sizeof(struct st));
+    memcpy(st_p, st, sizeof(struct stat));
     filelist_root = new_filenode_memfs_addr;
 }
 
@@ -266,7 +271,7 @@ static int memfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, of
     filler(buf, ".", NULL, 0);
     filler(buf, "..", NULL, 0);
     while (filenode_p) {
-        filler(buf, (char *) memfs[filenode_p->filename], (struct stat *) memfs[filenode_p->st]);
+        filler(buf, (char *) mem[filenode_p->filename], (struct stat *) mem[filenode_p->st], 0);
         node_addr = filenode_p->next;
         if (node_addr == -1) filenode_p = mem[node_addr];
         else filenode_p = NULL;
@@ -278,7 +283,7 @@ static int memfs_mknod(const char *path, mode_t mode, dev_t dev) {
     struct stat st;
     st.st_mode = S_IFREG | 0644;
     st.st_uid = fuse_get_context()->uid;
-    st.st_gid = fuse.get_context()->gid;
+    st.st_gid = fuse_get_context()->gid;
     st.st_nlink = 1;
     st.st_size = 0;
     create_filenode(path + 1, &st);
@@ -295,39 +300,39 @@ static int memfs_write(const char *path, const char *buf, size_t size, off_t off
     struct stat *st_p = (struct stat *) mem[filenode_p->st];
     st_p->st_size = offset + size;   // update file size;
     
-    if (content_list == NULL) { // no content already written
+    if (filenode_p->c_list == -1) { // no content already written
         memfs_addr c_list_head;
         memfs_addr c_list_addr = c_list_head;
         memfs_addr c_list_last = -1;
         size_t size_left = size;
         size_t size_written = 0;
         while (size_left > 0) {
-            memfs_addr c_list_addr = memfs_mm_alloc(ceil(sizeof(content_list) / 8));
+            memfs_addr c_list_addr = memfs_mm_alloc(ceil(sizeof(struct content_list) / 8));
             if (c_list_last == -1)
                 c_list_head = c_list_addr;
             else 
-                *((struct content_list *) mem[c_list_last])->next = clist_addr;
+                ((struct content_list *) mem[c_list_last])->next = c_list_addr;
 
             memfs_size_t memfs_size_needed = ceil(size_left / 8);
 
             if (memfs_size_needed > max_free_block_size() - 2) {
                 memfs_size_t allocated_size = max_free_block_size() - 2;
                 memfs_addr content_addr = memfs_mm_alloc(allocated_size);
-                *((struct content_list *) mem[c_list_addr])->this_content = content_addr;
-                char *content_writer = (char *) memfs[content_addr];
+                ((struct content_list *) mem[c_list_addr])->this_content = content_addr;
+                char *content_writer = (char *) mem[content_addr];
                 memcpy(content_writer, buf + size_written, BLOCK_SIZE * allocated_size);
                 size_left -= BLOCK_SIZE * allocated_size;
                 size_written += BLOCK_SIZE * allocated_size;
             }
             else {
                 memfs_addr content_addr = memfs_mm_alloc(memfs_size_needed);
-                *((struct content_list *) mem[c_list_addr])->this_content = content_addr;
-                char *content_writer = (char *) memfs[content_addr];
+                ((struct content_list *) mem[c_list_addr])->this_content = content_addr;
+                char *content_writer = (char *) mem[content_addr];
                 memcpy(content_writer, buf + size_written, size_left);
-                size_writeen += size_left;
+                size_written += size_left;
                 size_left = 0;
             }
-            *((struct content_list *) mem[c_list_addr])->next = -1;
+            ((struct content_list *) mem[c_list_addr])->next = -1;
             c_list_last = c_list_addr;
         }
         filenode_p->c_list = c_list_head;
@@ -360,32 +365,32 @@ static int memfs_write(const char *path, const char *buf, size_t size, off_t off
         c_list_addr = c_list_head;
         memfs_addr c_list_last = -1;
         while (size_left > 0) {
-            memfs_addr c_list_addr = memfs_mm_alloc(ceil(sizeof(content_list) / 8));
+            memfs_addr c_list_addr = memfs_mm_alloc(ceil(sizeof(struct content_list) / 8));
             if (c_list_last == -1)
                 c_list_head = c_list_addr;
             else 
-                *((struct content_list *) mem[c_list_last])->next = clist_addr;
+                ((struct content_list *) mem[c_list_last])->next = c_list_addr;
 
             memfs_size_t memfs_size_needed = ceil(size_left / 8);
 
             if (memfs_size_needed > max_free_block_size() - 2) {
                 memfs_size_t allocated_size = max_free_block_size() - 2;
                 memfs_addr content_addr = memfs_mm_alloc(allocated_size);
-                *((struct content_list *) mem[c_list_addr])->this_content = content_addr;
-                char *content_writer = (char *) memfs[content_addr];
+                ((struct content_list *) mem[c_list_addr])->this_content = content_addr;
+                char *content_writer = (char *) mem[content_addr];
                 memcpy(content_writer, content_concatenated + size_written, BLOCK_SIZE * allocated_size);
                 size_left -= BLOCK_SIZE * allocated_size;
                 size_written += BLOCK_SIZE * allocated_size;
             }
             else {
                 memfs_addr content_addr = memfs_mm_alloc(memfs_size_needed);
-                *((struct content_list *) mem[c_list_addr])->this_content = content_addr;
-                char *content_writer = (char *) memfs[content_addr];
+                ((struct content_list *) mem[c_list_addr])->this_content = content_addr;
+                char *content_writer = (char *) mem[content_addr];
                 memcpy(content_writer, content_concatenated + size_written, size_left);
-                size_writeen += size_left;
+                size_written += size_left;
                 size_left = 0;
             }
-            *((struct content_list *) mem[c_list_addr])->next = -1;
+            ((struct content_list *) mem[c_list_addr])->next = -1;
             c_list_last = c_list_addr;
         }
         filenode_p->c_list = c_list_head;
@@ -418,7 +423,7 @@ static int memfs_read(const char *path, char *buf, size_t size, off_t offset, st
     return size_read;
 }
 
-static int memfs_truncate(const char *path, size_t size) {
+static int memfs_truncate(const char *path, off_t size) {
     memfs_addr node_addr = get_filenode_addr(path + 1);
     struct filenode *filenode_p = (node_addr == -1) ? NULL : (struct filenode *) mem[node_addr];
     struct stat *st_p = (struct stat *) mem[filenode_p->st];
@@ -449,35 +454,36 @@ static int memfs_truncate(const char *path, size_t size) {
     c_list_addr = c_list_head;
     memfs_addr c_list_last = -1;
     while (size_left > 0) {
-        memfs_addr c_list_addr = memfs_mm_alloc(ceil(sizeof(content_list) / 8));
+        memfs_addr c_list_addr = memfs_mm_alloc(ceil(sizeof(struct content_list) / 8));
         if (c_list_last == -1)
             c_list_head = c_list_addr;
         else 
-            *((struct content_list *) mem[c_list_last])->next = clist_addr;
+            ((struct content_list *) mem[c_list_last])->next = c_list_addr;
 
         memfs_size_t memfs_size_needed = ceil(size_left / 8);
 
         if (memfs_size_needed > max_free_block_size() - 2) {
             memfs_size_t allocated_size = max_free_block_size() - 2;
             memfs_addr content_addr = memfs_mm_alloc(allocated_size);
-            *((struct content_list *) mem[c_list_addr])->this_content = content_addr;
-            char *content_writer = (char *) memfs[content_addr];
+            ((struct content_list *) mem[c_list_addr])->this_content = content_addr;
+            char *content_writer = (char *) mem[content_addr];
             memcpy(content_writer, content_concatenated + size_written, BLOCK_SIZE * allocated_size);
             size_left -= BLOCK_SIZE * allocated_size;
             size_written += BLOCK_SIZE * allocated_size;
         }
         else {
             memfs_addr content_addr = memfs_mm_alloc(memfs_size_needed);
-            *((struct content_list *) mem[c_list_addr])->this_content = content_addr;
-            char *content_writer = (char *) memfs[content_addr];
+            ((struct content_list *) mem[c_list_addr])->this_content = content_addr;
+            char *content_writer = (char *) mem[content_addr];
             memcpy(content_writer, content_concatenated + size_written, size_left);
-            size_writeen += size_left;
+            size_written += size_left;
             size_left = 0;
         }
-        *((struct content_list *) mem[c_list_addr])->next = -1;
+        ((struct content_list *) mem[c_list_addr])->next = -1;
         c_list_last = c_list_addr;
     }
     filenode_p->c_list = c_list_head;
+    return 0;
 }
 
 static int memfs_unlink(const char *path) {
@@ -486,7 +492,7 @@ static int memfs_unlink(const char *path) {
     struct filenode *filenode_p = (node_addr == -1) ? NULL : (struct filenode *) mem[node_addr];
     while (filenode_p) {
         char *filename_p = (char *) mem[filenode_p->filename];
-        if (strcmp(filename_p, filename) != 0) {
+        if (strcmp(filename_p, path + 1) != 0) {
             prev_addr = node_addr;
             node_addr = filenode_p->next;
             if (node_addr != -1) filenode_p = (struct filenode *) mem[node_addr];
@@ -495,24 +501,24 @@ static int memfs_unlink(const char *path) {
         else break;
     }
    
-    struct filenode *filenode_p = (node_addr == -1) ? NULL : (struct filenode *) mem[node_addr];
     memfs_mm_free(filenode_p->filename);
     memfs_mm_free(filenode_p->st);
 
     memfs_addr c_list_addr = filenode_p->c_list;
     while (c_list_addr != -1) {
         struct content_list *c_list_p = (struct content_list *) mem[c_list_addr];
-        memfs_mm_free(content_list->this_content);
-        memfs_addr temp = content_list->next;
-        memfs_mm_free(content_list->next);
+        memfs_mm_free(c_list_p->this_content);
+        memfs_addr temp = c_list_p->next;
+        memfs_mm_free(c_list_p->next);
         c_list_addr = temp;
     }
 
     if (prev_addr == -1) filelist_root = filenode_p->next;
-    else *((struct filenode *) mem[prev_addr])->next = filenode_p->next;
+    else ((struct filenode *) mem[prev_addr])->next = filenode_p->next;
     memfs_mm_free(filenode_p->next);
 
     memfs_mm_free(node_addr);
+    return 0;
 }
 
 static void *memfs_init(struct fuse_conn_info *conn) {
@@ -520,7 +526,7 @@ static void *memfs_init(struct fuse_conn_info *conn) {
     for (i = 0; i< BLOCK_NR; ++i)
         mem[i] = NULL;
 
-    memfs_mm_init()
+    memfs_mm_init();
     filelist_root = -1;
     return NULL;
 }
