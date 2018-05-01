@@ -1,3 +1,14 @@
+/*
+ * OSH Lab 3
+ * In Memory File System Using libfuse
+ * Email: <wuyongji317@gmail.com>
+ * 
+ * use `gcc -D_FILE_OFFSET_BITS=64 -o oshfs oshfc -lfuse -lm` to compile
+ * 
+ * - using implicit free list to manage memory
+ * - support chown & chmod
+ */
+
 #define FUSE_USE_VERSION 26
 
 #include <assert.h>
@@ -58,6 +69,8 @@ static int memfs_write(const char *path, const char *buf, size_t size, off_t off
 static int memfs_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi);
 static int memfs_truncate(const char *path, off_t size);
 static int memfs_unlink(const char *path);
+static int memfs_chown(const char *path, uid_t uid, gid_t gid);
+static int memfs_chmod(const char *path, mode_t mode);
 static void *memfs_init(struct fuse_conn_info *conn);
 
 static unsigned long pack(unsigned long size, unsigned long alloc) {
@@ -211,7 +224,7 @@ static memfs_addr memfs_mm_alloc(memfs_size_t asize) {
             mem[i] = (char *) mem[i - 1] + BLOCK_SIZE;
         map_mm(ftrp(match));
         put(ftrp(match), pack(asize, BLOCK_ALLOCATED));
-        if (mem[hdrp(next_blkp(match))] == NULL) map_mm(hdrp(next_blkp(match)));
+        map_mm(hdrp(next_blkp(match)));
         put(hdrp(next_blkp(match)), pack(csize - asize, BLOCK_FREE));
         put(ftrp(next_blkp(match)), pack(csize - asize, BLOCK_FREE));
     }
@@ -230,7 +243,7 @@ static memfs_addr memfs_mm_alloc(memfs_size_t asize) {
 static void create_filenode(const char *filename, const struct stat *st) {
     memfs_addr new_filenode_memfs_addr = memfs_mm_alloc(ceil((double) sizeof(struct filenode) / 8));
     struct filenode *new_filenode_mapped = (struct filenode *) mem[new_filenode_memfs_addr];
-    new_filenode_mapped->filename = memfs_mm_alloc(ceil(((double) strlen(filename) + 1) / 8));
+    new_filenode_mapped->filename = memfs_mm_alloc(ceil((double) (strlen(filename) + 1) / 8));
     char *filename_p = (char *) mem[new_filenode_mapped->filename];
     memcpy(filename_p, filename, strlen(filename) + 1);
     new_filenode_mapped->c_list = -1;
@@ -455,7 +468,7 @@ static int memfs_truncate(const char *path, off_t size) {
     memfs_addr content_addr = c_list_p->this_content;
         char *content_reader = (char *) mem[content_addr];
         memcpy(content_concatenated + content_already_read, content_reader, BLOCK_SIZE * (get_size(hdrp(content_addr)) - 2));
-        content_already_read += BLOCK_SIZE * (get_size(hdrp(content_addr) - 2));
+        content_already_read += BLOCK_SIZE * (get_size(hdrp(content_addr)) - 2);
         memfs_mm_free(content_addr);
         memfs_addr temp = c_list_p->next;
         memfs_mm_free(c_list_addr);
@@ -471,7 +484,7 @@ static int memfs_truncate(const char *path, off_t size) {
     c_list_addr = c_list_head;
     memfs_addr c_list_last = -1;
     while (size_left > 0) {
-        memfs_addr c_list_addr = memfs_mm_alloc((double) ceil((double) sizeof(struct content_list) / 8));
+        memfs_addr c_list_addr = memfs_mm_alloc(ceil((double) sizeof(struct content_list) / 8));
         if (c_list_last == -1)
             c_list_head = c_list_addr;
         else 
@@ -548,6 +561,23 @@ static void *memfs_init(struct fuse_conn_info *conn) {
     return NULL;
 }
 
+static int memfs_chmod(const char *path, mode_t mode) {
+    memfs_addr node_addr = get_filenode_addr(path + 1);
+    struct filenode *filenode_p = (node_addr == -1) ? NULL : (struct filenode *) mem[node_addr];
+    struct stat *st_p = (struct stat *) mem[filenode_p->st]; 
+    st_p->st_mode = mode;
+    return 0;
+}
+
+static int memfs_chown(const char *path, uid_t uid, gid_t gid) {
+    memfs_addr node_addr = get_filenode_addr(path + 1);
+    struct filenode *filenode_p = (node_addr == -1) ? NULL : (struct filenode *) mem[node_addr];
+    struct stat *st_p = (struct stat *) mem[filenode_p->st]; 
+    st_p->st_uid = uid;
+    st_p->st_gid = gid;
+    return 0;
+}
+
 static const struct fuse_operations op = {
     .init = memfs_init,
     .getattr = memfs_getattr,
@@ -558,6 +588,8 @@ static const struct fuse_operations op = {
     .truncate = memfs_truncate,
     .read = memfs_read,
     .unlink = memfs_unlink,
+    .chown = memfs_chown,
+    .chmod = memfs_chmod
 };
 
 int main(int argc, char *argv[])
