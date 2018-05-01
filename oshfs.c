@@ -100,7 +100,7 @@ static void map_mm(memfs_addr address) {
     if ((mem[address] = mmap(NULL, BLOCK_SIZE,  PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0))
         == MAP_FAILED) {
             perror("mmap failed.");
-            return;
+            exit(0);
     }
     memset(mem[address], 0, BLOCK_SIZE);
 }
@@ -109,7 +109,7 @@ static void unmap_mm(memfs_addr address) {
     assert(mem[address] != NULL);
     if (munmap(mem[address], BLOCK_SIZE) < 0) {
         perror("munmap failed.");
-        return;
+        exit(0);
     }
     mem[address] = NULL;
 }
@@ -133,10 +133,10 @@ static void memfs_mm_free(memfs_addr bp) {
     memfs_size_t size = get_size(hdrp(bp));
     put(hdrp(bp), pack(size, BLOCK_FREE));
     put(ftrp(bp), pack(size, BLOCK_FREE));
-    
-    memfs_addr footer = ftrp(bp);
+
     memfs_addr i;
-    for (i = bp; i < footer; ++i) unmap_mm(i);
+    munmap(mem[bp], BLOCK_SIZE * (size - 2));
+    for (i = bp; i < ftrp(bp); ++i) mem[i] = NULL;
 
     memfs_mm_coalesce(bp);
 }
@@ -152,7 +152,7 @@ static void memfs_mm_coalesce(memfs_addr bp) {
     else if (prev_alloc == BLOCK_ALLOCATED && next_alloc == BLOCK_FREE) {
         size += get_size(hdrp(next_blkp(bp)));
         unmap_mm(ftrp(bp));
-        unmap_mm(hdrp(next_blkp(bp)));
+        unmap_mm(ftrp(bp) + 1);
         put(hdrp(bp), pack(size, BLOCK_FREE));
         put(ftrp(bp), pack(size, BLOCK_FREE));
     }
@@ -160,8 +160,8 @@ static void memfs_mm_coalesce(memfs_addr bp) {
         size += get_size(hdrp(prev_blkp(bp)));
         put(ftrp(bp), pack(size, BLOCK_FREE));
         put(hdrp(prev_blkp(bp)), pack(size, BLOCK_FREE));
-        unmap_mm(ftrp(bp));
-        unmap_mm(bp - 2);
+        unmap_mm(hdrp(bp));
+        unmap_mm(hdrp(bp) - 1);
     }
     else {
         size += get_size(hdrp(prev_blkp(bp))) + get_size(ftrp(next_blkp(bp)));
@@ -204,9 +204,12 @@ static memfs_addr memfs_mm_alloc(memfs_size_t asize) {
     memfs_addr i;
     if (csize - asize >= 3) {
         put(hdrp(match), pack(asize, BLOCK_ALLOCATED));
-        for (i = match; i < ftrp(match); ++i)
-            if (mem[i] == NULL) map_mm(i);
-        if (mem[ftrp(match)] == NULL) map_mm(ftrp(match));
+        assert(mem[match] == NULL);
+        mem[match] = mmap(NULL, BLOCK_SIZE * (asize - 2),  PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        memset(mem[match], 0, BLOCK_SIZE * (asize - 2));
+        for (i = match + 1; i < ftrp(match); ++i)
+            mem[i] = (char *) mem[i - 1] + BLOCK_SIZE;
+        map_mm(ftrp(match));
         put(ftrp(match), pack(asize, BLOCK_ALLOCATED));
         if (mem[hdrp(next_blkp(match))] == NULL) map_mm(hdrp(next_blkp(match)));
         put(hdrp(next_blkp(match)), pack(csize - asize, BLOCK_FREE));
@@ -214,8 +217,11 @@ static memfs_addr memfs_mm_alloc(memfs_size_t asize) {
     }
     else {
         put(hdrp(match), pack(csize, BLOCK_ALLOCATED));
-        for (i = match; i < ftrp(match); ++i)
-            if (mem[i] == NULL) map_mm(i);
+        assert(mem[match] == NULL);
+        mem[match] = mmap(NULL, BLOCK_SIZE * (csize - 2),  PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        memset(mem[match], 0, BLOCK_SIZE * (csize - 2));
+        for (i = match + 1; i < ftrp(match); ++i)
+            mem[i] = (char *) mem[i - 1] + BLOCK_SIZE;
         put(ftrp(match), pack(csize, BLOCK_ALLOCATED));
     }
     return match;
@@ -279,7 +285,7 @@ static int memfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, of
     while (filenode_p) {
         filler(buf, (char *) mem[filenode_p->filename], (struct stat *) mem[filenode_p->st], 0);
         node_addr = filenode_p->next;
-        if (node_addr == -1) filenode_p = mem[node_addr];
+        if (node_addr != -1) filenode_p = (struct filenode *) mem[node_addr];
         else filenode_p = NULL;
     }
     return 0;
@@ -347,13 +353,13 @@ static int memfs_write(const char *path, const char *buf, size_t size, off_t off
         size_t content_already_read = 0;
         char *content_concatenated = mmap(NULL, MAX_CONCATENATED,  PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         memfs_addr c_list_addr = filenode_p->c_list;
-        struct content_list *c_list_p = mem[c_list_addr];
+        struct content_list *c_list_p = (struct content_list *) mem[c_list_addr];
         while (c_list_p) {
             memfs_addr content_addr = c_list_p->this_content;
             char *content_reader = (char *) mem[content_addr];
             memcpy(content_concatenated + content_already_read, content_reader, BLOCK_SIZE * (get_size(hdrp(content_addr)) - 2));
+            content_already_read += BLOCK_SIZE * (get_size(hdrp(content_addr)) - 2);
             memfs_mm_free(content_addr);
-            content_already_read += BLOCK_SIZE * (get_size(hdrp(content_addr)));
             memfs_addr temp = c_list_p->next;
             memfs_mm_free(c_list_addr);
             c_list_addr = temp;
@@ -397,9 +403,9 @@ static int memfs_write(const char *path, const char *buf, size_t size, off_t off
             }
             ((struct content_list *) mem[c_list_addr])->next = -1;
             c_list_last = c_list_addr;
-        }
-        munmap(content_concatenated, MAX_CONCATENATED);
-        filenode_p->c_list = c_list_head;
+    }
+    munmap(content_concatenated, MAX_CONCATENATED);
+    filenode_p->c_list = c_list_head;
     }
     return size;
 }
@@ -413,12 +419,12 @@ static int memfs_read(const char *path, char *buf, size_t size, off_t offset, st
     size_t content_already_read = 0;
     char *content_concatenated = mmap(NULL, MAX_CONCATENATED,  PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     memfs_addr c_list_addr = filenode_p->c_list;
-    struct content_list *c_list_p = (c_list_addr -= -1) ? NULL : mem[c_list_addr];
+    struct content_list *c_list_p = (c_list_addr == -1) ? NULL : (struct content_list *) mem[c_list_addr];
     while (c_list_p) {
         memfs_addr content_addr = c_list_p->this_content;
         char *content_reader = (char *) mem[content_addr];
         memcpy(content_concatenated + content_already_read, content_reader, BLOCK_SIZE * (get_size(hdrp(content_addr)) - 2));
-        content_already_read += BLOCK_SIZE * (get_size(hdrp(content_addr)));
+        content_already_read += BLOCK_SIZE * (get_size(hdrp(content_addr)) - 2);
         c_list_addr = c_list_p->next;
         if (c_list_addr != -1) c_list_p = (struct content_list *) mem[c_list_addr];
         else c_list_p = NULL;
@@ -444,13 +450,13 @@ static int memfs_truncate(const char *path, off_t size) {
     size_t content_already_read = 0;
     char *content_concatenated = mmap(NULL, MAX_CONCATENATED,  PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     memfs_addr c_list_addr = filenode_p->c_list;
-    struct content_list *c_list_p = (c_list_addr -= -1) ? NULL : mem[c_list_addr];
+    struct content_list *c_list_p = (c_list_addr == -1) ? NULL : (struct content_list *) mem[c_list_addr];
     while (c_list_p) {
     memfs_addr content_addr = c_list_p->this_content;
         char *content_reader = (char *) mem[content_addr];
         memcpy(content_concatenated + content_already_read, content_reader, BLOCK_SIZE * (get_size(hdrp(content_addr)) - 2));
+        content_already_read += BLOCK_SIZE * (get_size(hdrp(content_addr) - 2));
         memfs_mm_free(content_addr);
-        content_already_read += BLOCK_SIZE * (get_size(hdrp(content_addr)));
         memfs_addr temp = c_list_p->next;
         memfs_mm_free(c_list_addr);
         c_list_addr = temp;
