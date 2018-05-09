@@ -3,7 +3,7 @@
  * In Memory File System Using libfuse
  * Email: <wuyongji317@gmail.com>
  * 
- * use `gcc -D_FILE_OFFSET_BITS=64 -o oshfs oshfc -lfuse -lm` to compile
+ * use `gcc -D_FILE_OFFSET_BITS=64 -o oshfs oshfs.c -lfuse -lm` to compile
  * 
  * - using implicit free list to manage memory
  * - support chown & chmod
@@ -20,11 +20,11 @@
 #include <stdio.h>
 #include <math.h>
 
-#define BLOCK_NR 64 * 1024
-#define BLOCK_SIZE 8
+#define BLOCK_NR 524288         // total size : 4 Mb
+#define BLOCK_SIZE 8            // block size : 8 bytes
 #define BLOCK_ALLOCATED 1
 #define BLOCK_FREE 0
-#define MAX_CONCATENATED 64 * 1024 * 8
+#define MAX_CONCATENATED BLOCK_NR * BLOCK_SIZE
 
 typedef unsigned long memfs_addr;
 typedef unsigned long memfs_size_t;
@@ -241,14 +241,14 @@ static memfs_addr memfs_mm_alloc(memfs_size_t asize) {
 }
 
 static void create_filenode(const char *filename, const struct stat *st) {
-    memfs_addr new_filenode_memfs_addr = memfs_mm_alloc(ceil((double) sizeof(struct filenode) / 8));
+    memfs_addr new_filenode_memfs_addr = memfs_mm_alloc(ceil((double) sizeof(struct filenode) / BLOCK_SIZE));
     struct filenode *new_filenode_mapped = (struct filenode *) mem[new_filenode_memfs_addr];
-    new_filenode_mapped->filename = memfs_mm_alloc(ceil((double) (strlen(filename) + 1) / 8));
+    new_filenode_mapped->filename = memfs_mm_alloc(ceil((double) (strlen(filename) + 1) / BLOCK_SIZE));
     char *filename_p = (char *) mem[new_filenode_mapped->filename];
     memcpy(filename_p, filename, strlen(filename) + 1);
     new_filenode_mapped->c_list = -1;
     new_filenode_mapped->next = filelist_root;
-    new_filenode_mapped->st = memfs_mm_alloc(ceil((double) sizeof(struct stat) / 8));
+    new_filenode_mapped->st = memfs_mm_alloc(ceil((double) sizeof(struct stat) / BLOCK_SIZE));
     struct stat *st_p = mem[new_filenode_mapped->st];
     memcpy(st_p, st, sizeof(struct stat));
     filelist_root = new_filenode_memfs_addr;
@@ -332,13 +332,13 @@ static int memfs_write(const char *path, const char *buf, size_t size, off_t off
         size_t size_left = size;
         size_t size_written = 0;
         while (size_left > 0) {
-            memfs_addr c_list_addr = memfs_mm_alloc(ceil((double) sizeof(struct content_list) / 8));
+            memfs_addr c_list_addr = memfs_mm_alloc(ceil((double) sizeof(struct content_list) / BLOCK_SIZE));
             if (c_list_last == -1)
                 c_list_head = c_list_addr;
             else 
                 ((struct content_list *) mem[c_list_last])->next = c_list_addr;
 
-            memfs_size_t memfs_size_needed = ceil((double) size_left / 8);
+            memfs_size_t memfs_size_needed = ceil((double) size_left / BLOCK_SIZE);
 
             if (memfs_size_needed > max_free_block_size() - 2) {
                 memfs_size_t allocated_size = max_free_block_size() - 2;
@@ -389,13 +389,13 @@ static int memfs_write(const char *path, const char *buf, size_t size, off_t off
         c_list_addr = c_list_head;
         memfs_addr c_list_last = -1;
         while (size_left > 0) {
-            memfs_addr c_list_addr = memfs_mm_alloc(ceil((double) sizeof(struct content_list) / 8));
+            memfs_addr c_list_addr = memfs_mm_alloc(ceil((double) sizeof(struct content_list) / BLOCK_SIZE));
             if (c_list_last == -1)
                 c_list_head = c_list_addr;
             else 
                 ((struct content_list *) mem[c_list_last])->next = c_list_addr;
 
-            memfs_size_t memfs_size_needed = ceil((double) size_left / 8);
+            memfs_size_t memfs_size_needed = ceil((double) size_left / BLOCK_SIZE);
 
             if (memfs_size_needed > max_free_block_size() - 2) {
                 memfs_size_t allocated_size = max_free_block_size() - 2;
@@ -484,13 +484,13 @@ static int memfs_truncate(const char *path, off_t size) {
     c_list_addr = c_list_head;
     memfs_addr c_list_last = -1;
     while (size_left > 0) {
-        memfs_addr c_list_addr = memfs_mm_alloc(ceil((double) sizeof(struct content_list) / 8));
+        memfs_addr c_list_addr = memfs_mm_alloc(ceil((double) sizeof(struct content_list) / BLOCK_SIZE));
         if (c_list_last == -1)
             c_list_head = c_list_addr;
         else 
             ((struct content_list *) mem[c_list_last])->next = c_list_addr;
 
-        memfs_size_t memfs_size_needed = ceil((double) size_left / 8);
+        memfs_size_t memfs_size_needed = ceil((double) size_left / BLOCK_SIZE);
 
         if (memfs_size_needed > max_free_block_size() - 2) {
             memfs_size_t allocated_size = max_free_block_size() - 2;
