@@ -10,8 +10,8 @@ Email: <wuyongji317@gmail.com>
 - 大文件如果文件系统地址空间没有大小足够的连续空闲块则分块存储，文件的内容（content）用链表的结构进行链接
 - 文件系统地址空间空间不足时报错`no memory in memfs available.`
 - `mmap`和`munmap`时error handling
-- 支持`chmod`, `chown`操作
-**implicit free list 每个块保存的信息**
+- 支持`chmod`, `chown`操作   
+**implicit free list 每个块保存的信息**   
 ![linkedblock](linkedblock.png)   
 **测试通过下列命令**
 - `ls`
