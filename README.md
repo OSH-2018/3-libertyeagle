@@ -28,3 +28,5 @@ Email: <wuyongji317@gmail.com>
     - `2097152 bytes (2.1 MB, 2.0 MiB) copied, 1.94881 s, 1.1 MB/s`
 - `dd if=/dev/urandom of=testfile bs=1M count=1 seek=2`
     - `1048576 bytes (1.0 MB, 1.0 MiB) copied, 2.35701 s, 445 kB/s`
+- `dd if=testfile of=/dev/null`
+    - `3145728 bytes (3.1 MB, 3.0 MiB) copied, 0.0840754 s, 37.4 MB/s`
