@@ -20,11 +20,11 @@
 #include <stdio.h>
 #include <math.h>
 
-#define BLOCK_NR 524288         // total size : 4 Mb
-#define BLOCK_SIZE 8            // block size : 8 bytes
+#define BLOCK_NR 131072         // total size : 512 MB
+#define BLOCK_SIZE 4096         // block size : 4 KB
 #define BLOCK_ALLOCATED 1
 #define BLOCK_FREE 0
-#define MAX_CONCATENATED BLOCK_NR * BLOCK_SIZE
+#define MAX_CONCATENATED (BLOCK_NR * BLOCK_SIZE)
 
 typedef unsigned long memfs_addr;
 typedef unsigned long memfs_size_t;
@@ -43,7 +43,6 @@ struct filenode {
 
 static void *mem[BLOCK_NR];
 static memfs_addr list_head;
-static memfs_addr filelist_root;
 
 static memfs_addr hdrp(memfs_addr bp);
 static memfs_addr ftrp(memfs_addr bp);
@@ -128,15 +127,16 @@ static void unmap_mm(memfs_addr address) {
 }
 
 static void memfs_mm_init(void) {
-    map_mm(0);
+    map_mm(0);                         // block 0 is used to save filenode header
     map_mm(1);
-    put(0, pack(2, BLOCK_ALLOCATED));  // prologue block
-    put(1, pack(2, BLOCK_ALLOCATED));
-    list_head = 1;
     map_mm(2);
+    put(1, pack(2, BLOCK_ALLOCATED));  // prologue block
+    put(2, pack(2, BLOCK_ALLOCATED));
+    list_head = 2;
+    map_mm(3);
     map_mm(BLOCK_NR - 2);
-    put(2, pack(BLOCK_NR - 3, BLOCK_FREE)); // initial free block
-    put(BLOCK_NR - 2, pack(BLOCK_NR - 3, BLOCK_FREE));
+    put(3, pack(BLOCK_NR - 4, BLOCK_FREE)); // initial free block
+    put(BLOCK_NR - 2, pack(BLOCK_NR - 4, BLOCK_FREE));
     map_mm(BLOCK_NR - 1);
     put(BLOCK_NR - 1, pack(0, BLOCK_ALLOCATED));    // epilogue block
 }
@@ -210,7 +210,8 @@ static memfs_addr memfs_mm_alloc(memfs_size_t asize) {
     }
 
     if (match == -1) {
-        fprintf(stderr, "no memory in memfs available.\n");
+        errno = ENOMEM;
+        return -1;
     }
 
     memfs_size_t csize = get_size(hdrp(match));
@@ -247,15 +248,15 @@ static void create_filenode(const char *filename, const struct stat *st) {
     char *filename_p = (char *) mem[new_filenode_mapped->filename];
     memcpy(filename_p, filename, strlen(filename) + 1);
     new_filenode_mapped->c_list = -1;
-    new_filenode_mapped->next = filelist_root;
+    new_filenode_mapped->next = *((memfs_addr *)mem[0]);
     new_filenode_mapped->st = memfs_mm_alloc(ceil((double) sizeof(struct stat) / BLOCK_SIZE));
     struct stat *st_p = mem[new_filenode_mapped->st];
     memcpy(st_p, st, sizeof(struct stat));
-    filelist_root = new_filenode_memfs_addr;
+    *((memfs_addr *)mem[0]) = new_filenode_memfs_addr;
 }
 
 static memfs_addr get_filenode_addr(const char *filename) {
-    memfs_addr node_addr = filelist_root;
+    memfs_addr node_addr = *((memfs_addr *)mem[0]);
     struct filenode *filenode_p = (node_addr == -1) ? NULL : (struct filenode *) mem[node_addr];
     while (filenode_p) {
         char *filename_p = (char *) mem[filenode_p->filename];
@@ -291,7 +292,7 @@ static int memfs_getattr(const char *path, struct stat *stbuf) {
 }
 
 static int memfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi) {
-    memfs_addr node_addr = filelist_root;
+    memfs_addr node_addr = *((memfs_addr *)mem[0]);
     struct filenode *filenode_p = (node_addr == -1) ? NULL : (struct filenode *) mem[node_addr];
     filler(buf, ".", NULL, 0);
     filler(buf, "..", NULL, 0);
@@ -323,7 +324,7 @@ static int memfs_write(const char *path, const char *buf, size_t size, off_t off
     memfs_addr node_addr = get_filenode_addr(path + 1);
     struct filenode *filenode_p = (node_addr == -1) ? NULL : (struct filenode *) mem[node_addr];
     struct stat *st_p = (struct stat *) mem[filenode_p->st];
-    st_p->st_size = offset + size;   // update file size;
+    if (offset + size > st_p->st_size) st_p->st_size = offset + size;   // update file size if necessary;
     
     if (filenode_p->c_list == -1) { // no content already written
         memfs_addr c_list_head;
@@ -518,7 +519,7 @@ static int memfs_truncate(const char *path, off_t size) {
 }
 
 static int memfs_unlink(const char *path) {
-    memfs_addr node_addr = filelist_root;
+    memfs_addr node_addr = *((memfs_addr *)mem[0]);
     memfs_addr prev_addr = -1;
     struct filenode *filenode_p = (node_addr == -1) ? NULL : (struct filenode *) mem[node_addr];
     while (filenode_p) {
@@ -544,7 +545,7 @@ static int memfs_unlink(const char *path) {
         c_list_addr = temp;
     }
 
-    if (prev_addr == -1) filelist_root = filenode_p->next;
+    if (prev_addr == -1) *((memfs_addr *)mem[0]) = filenode_p->next;
     else ((struct filenode *) mem[prev_addr])->next = filenode_p->next;
 
     memfs_mm_free(node_addr);
@@ -557,7 +558,7 @@ static void *memfs_init(struct fuse_conn_info *conn) {
         mem[i] = NULL;
 
     memfs_mm_init();
-    filelist_root = -1;
+    *((memfs_addr *)mem[0]) = -1;
     return NULL;
 }
 

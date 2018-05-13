@@ -1,5 +1,9 @@
 # OSH Lab 3   
-Email: <wuyongji317@gmail.com>   
+**5-13更新**   
+- 默认文件系统总大小更改为512MB，块大小block size为4KB
+- 现将文件信息列表头指针(`filenode_root`)保存在`mem[0`所映射到的内存地址中
+- 文件系统地址空间内存不足时`memfs_mm_alloc`返回-1并设置`errno`
+
 **文件系统总大小为4Mb，块大小block size为8 bytes**   
 **本程序用到了`math.h`，因此需要使用`-lm`参数编译**   
 完整的编译指令如下   
