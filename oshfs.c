@@ -384,7 +384,7 @@ static int memfs_write(const char *path, const char *buf, size_t size, off_t off
 
         memcpy(content_concatenated + offset, buf, size);
         
-        size_t size_left = offset + size;
+        size_t size_left = st_p->st_size;
         size_t size_written = 0;
         memfs_addr c_list_head;
         c_list_addr = c_list_head;
